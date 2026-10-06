@@ -392,6 +392,12 @@
   .pagebtn:disabled { opacity: 0.35; cursor: default; }
   #pageIndicator { font-family: var(--mono); }
   .hidden { display: none !important; }
+  .update-banner { display:flex; align-items:center; justify-content:center; gap:12px; padding:8px 32px; background:#0d3b38; border-bottom:1px solid var(--accent-dim); color:var(--text); font-size:13px; }
+  .update-banner svg { color:var(--accent); flex:0 0 auto; }
+  .update-refresh { background:var(--accent); color:#0f1115; border:none; border-radius:6px; padding:4px 14px; font-size:12px; font-weight:600; font-family:var(--sans); cursor:pointer; }
+  .update-refresh:hover { filter:brightness(1.12); }
+  .update-dismiss { background:transparent; border:none; color:var(--text-dim); font-size:18px; line-height:1; cursor:pointer; padding:0 4px; margin-left:8px; }
+  .update-dismiss:hover { color:var(--text); }
 </style>
 </head>
 <body>
@@ -410,7 +416,7 @@
     <div class="header-right">
       <div class="stat">
         <div class="last-updated" id="lastUpdatedDate">Last updated Oct 6, 2026</div>
-        <div class="label" id="lastUpdatedTime">09:00 CEST</div>
+        <div class="label" id="lastUpdatedTime">09:15 CEST</div>
       </div>
       <div class="stats" id="statsBox"></div>
     </div>
@@ -440,6 +446,12 @@
     </select>
   </div>
 </header>
+<div class="update-banner hidden" id="updateBanner" role="status" aria-live="polite">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/></svg>
+  <span>New data is available.</span>
+  <button type="button" class="update-refresh" id="updateRefreshBtn">Refresh</button>
+  <button type="button" class="update-dismiss" id="updateDismissBtn" aria-label="Dismiss">&times;</button>
+</div>
 </div>
 
 <div class="table-wrap">
@@ -973,6 +985,106 @@ window.addEventListener('message', function(event) {
 });
 
 init();
+
+(function () {
+  const banner = document.getElementById('updateBanner');
+  const dateEl = document.getElementById('lastUpdatedDate');
+  const timeEl = document.getElementById('lastUpdatedTime');
+  if (!banner || !dateEl || !timeEl) return;
+
+  const norm = s => (s || '').replace(/^Last updated\s*/i, '').trim();
+  const loaded = norm(dateEl.textContent) + '|' + (timeEl.textContent || '').trim();
+  let latest = loaded, dismissed = null, lastCheck = 0;
+
+  async function readLiveVersion() {
+    const res = await fetch(location.pathname + '?cb=' + Date.now(), { cache: 'no-store', headers: { Range: 'bytes=0-150000' } });
+    if (!res.ok && res.status !== 206) return null;
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    const reD = /id="lastUpdatedDate">([^<]*)</, reT = /id="lastUpdatedTime">([^<]*)</;
+    let text = '', out = null;
+    while (text.length < 200000) {
+      const r = await reader.read();
+      if (r.done) break;
+      text += dec.decode(r.value, { stream: true });
+      const d = reD.exec(text), t = reT.exec(text);
+      if (d && t) { out = norm(d[1]) + '|' + t[1].trim(); break; }
+    }
+    Promise.resolve(reader.cancel()).catch(() => {});
+    return out;
+  }
+
+  async function check() {
+    const now = Date.now();
+    if (now - lastCheck < 30000) return;
+    lastCheck = now;
+    try {
+      const v = await readLiveVersion();
+      if (v && v !== loaded) {
+        latest = v;
+        if (v !== dismissed) banner.classList.remove('hidden');
+      }
+    } catch (e) {}
+  }
+
+  function saveState() {
+    try {
+      sessionStorage.setItem('lb-restore', JSON.stringify({
+        tab: state.tab, search: state.globalSearch, brand: state.brand, priority: state.priority,
+        sortKey: state.sortKey, sortDir: state.sortDir, pageSize: state.pageSize, page: state.page,
+        y: window.scrollY, t: Date.now()
+      }));
+    } catch (e) {}
+  }
+
+  document.getElementById('updateRefreshBtn').addEventListener('click', () => {
+    saveState();
+    const url = location.pathname + '?v=' + Date.now();
+    (window.__lbNavigate || (u => { location.href = u; }))(url);
+  });
+  document.getElementById('updateDismissBtn').addEventListener('click', () => {
+    dismissed = latest;
+    banner.classList.add('hidden');
+  });
+
+  try {
+    if (/[?&]v=/.test(location.search)) history.replaceState(null, '', location.pathname + location.hash);
+  } catch (e) {}
+
+  try {
+    const raw = sessionStorage.getItem('lb-restore');
+    if (raw) {
+      sessionStorage.removeItem('lb-restore');
+      const s = JSON.parse(raw);
+      if (Date.now() - s.t < 120000) {
+        if (s.tab && s.tab !== state.tab) switchTab(s.tab);
+        const brandSel = document.getElementById('brandFilter');
+        const prioSel = document.getElementById('priorityFilter');
+        const sizeSel = document.getElementById('pageSizeSelect');
+        const box = document.getElementById('globalSearchBox');
+        brandSel.value = s.brand || ''; state.brand = brandSel.value;
+        prioSel.value = s.priority || ''; state.priority = prioSel.value;
+        sizeSel.value = String(s.pageSize || state.pageSize); state.pageSize = parseInt(sizeSel.value, 10) || state.pageSize;
+        state.sortKey = s.sortKey || state.sortKey;
+        state.sortDir = s.sortDir || state.sortDir;
+        state.globalSearch = s.search || '';
+        box.value = state.globalSearch;
+        document.getElementById('globalSearchClear').classList.toggle('visible', !!state.globalSearch);
+        state.page = s.page || 1;
+        updateTabCounts();
+        render();
+        requestAnimationFrame(() => window.scrollTo(0, s.y || 0));
+      }
+    }
+  } catch (e) {}
+
+  setTimeout(check, 4000);
+  setInterval(check, 300000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+  window.addEventListener('focus', check);
+
+  if (/[?&]demo-update\b/.test(location.search)) setTimeout(() => banner.classList.remove('hidden'), 1500);
+})();
 </script>
 </body>
 </html>
